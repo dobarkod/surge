@@ -1,0 +1,89 @@
+#!/usr/bin/env python
+
+import gevent
+from gevent import monkey
+monkey.patch_all()
+import time
+import sys
+import json
+
+from multiprocessing import Process, Queue
+
+try:
+    from test import run
+except ImportError as ex:
+    raise Exception("Cannot import custom test scenario: " + str(ex))
+
+def green_worker(start_time, duration, q, func):
+    while True:
+        t0 = time.time()
+        if (t0 - start_time) > duration:
+            return
+
+        err = None
+        try:
+            func()
+        except Exception as ex:
+            err = str(ex)
+
+        t1 = time.time()
+
+        put = q.put if hasattr(q, 'put') else q.append
+        put({
+            'start': t0,
+            'duration': (t1 - t0),
+            'success': not err,
+            'error_details': err
+        })
+
+def multiproc_worker(duration, concurrency, q, func):
+    start_time = time.time()
+
+    jobs = [gevent.spawn(green_worker, start_time, duration, q, func)
+        for i in range(concurrency)]
+    gevent.joinall(jobs)
+
+
+def manager(duration, concurrency, func):
+    results = []
+
+    if concurrency < 5:
+        t0 = time.time()
+        multiproc_worker(duration, concurrency, results, func)
+        t1 = time.time()
+    else:
+        ps = []
+        q = Queue()
+
+        for i in range(5):
+            p = Process(target=multiproc_worker,
+                args=(duration, concurrency / 5, q, func))
+            ps.append(p)
+
+        t0 = time.time()
+
+        for p in ps:
+            p.start()
+
+        while ps:
+            while not q.empty():
+                results.append(q.get())
+
+            for p in ps:
+                if not p.is_alive():
+                    ps.remove(p)
+                    break
+
+        t1 = time.time()
+
+    return {
+        'results': results,
+        'start_time': t0,
+        'duration': (t1 - t0)
+    }
+
+
+if __name__ == '__main__':
+    concurrency = int(sys.argv[1])
+    duration = int(sys.argv[2])
+    print json.dumps(manager(duration, concurrency, run))
